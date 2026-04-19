@@ -1091,12 +1091,27 @@ def load_queue_from_pipeline(src_db: str = SRC_DB, dst_db: str = DST_DB,
     """clean_products dan scrape_queue ga URL lar yuklaydi."""
     if not os.path.exists(src_db):
         log.error(f"pipeline.db topilmadi: {src_db}")
-        return 0
+        return -1
 
     src_conn = sqlite3.connect(src_db)
     src_conn.row_factory = sqlite3.Row
     dst_conn = sqlite3.connect(dst_db, timeout=30)
     dst_conn.execute("PRAGMA journal_mode=WAL")
+
+    # step6 uchun clean_products majburiy. Yo'q bo'lsa aniq ko'rsatma beramiz.
+    table_exists = src_conn.execute("""
+        SELECT 1
+        FROM sqlite_master
+        WHERE type='table' AND name='clean_products'
+        LIMIT 1
+    """).fetchone()
+    if not table_exists:
+        src_conn.close()
+        dst_conn.close()
+        log.error("pipeline.db da clean_products jadvali topilmadi.")
+        log.error("Avval quyidagilarni bajaring: python /home/maxs/step/run.py --all")
+        log.error("Yoki kamida filter bosqichi: python /home/maxs/step/run.py --filter")
+        return -1
 
     query = """
         SELECT brand, barcode, sku, product_id, product_name,
@@ -1605,7 +1620,15 @@ def run_scraper(domain_filter: str = None, limit: int = None,
 
     # DB init
     init_scraped_db()
-    load_queue_from_pipeline(domain_filter=domain_filter)
+    load_result = load_queue_from_pipeline(domain_filter=domain_filter)
+    if load_result < 0:
+        # clean_products yoki pipeline tayyor emas.
+        if notify_on:
+            telegram_send_message(
+                "❌ Scraper to'xtadi: clean_products topilmadi. "
+                "Avval python /home/maxs/step/run.py --all (yoki --filter) ishlating."
+            )
+        return
 
     total_done = total_error = total_skip = 0
     batch_n = 0
