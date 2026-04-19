@@ -3,9 +3,17 @@
 
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Loyiha serverda /home/maxs ichida joylashgan.
+# Kerak bo'lsa ishga tushirishda ROOT_DIR env bilan override qilish mumkin.
+ROOT_DIR="${ROOT_DIR:-/home/maxs}"
 VENV_DIR="$ROOT_DIR/.venv"
 SESSION_NAME="trofey"
+
+if [ ! -f "$ROOT_DIR/requirements.txt" ]; then
+    echo "ERR: $ROOT_DIR/requirements.txt topilmadi"
+    echo "ROOT_DIR ni tekshiring yoki vaqtincha ROOT_DIR=/to/gri/path bash setup_server.sh deb ishga tushiring."
+    exit 1
+fi
 
 echo "================================================"
 echo "  TROFEY PIPELINE SETUP"
