@@ -13,6 +13,7 @@ import os
 import sqlite3
 from datetime import datetime, UTC
 from ddgs import DDGS
+from anti_bot import get_next_proxy_url, human_sleep
 
 # ── Logging ─────────────────────────────────────────────────────────────────
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../pipeline.log')
@@ -92,7 +93,9 @@ def ddg_search(query: str, max_results: int = MAX_RESULTS) -> list:
     DuckDuckGo qidiruvini bajaradi.
     RateLimitException yoki boshqa xatoda Exception raise qiladi.
     """
-    with DDGS() as ddgs:
+    proxy_url = get_next_proxy_url()
+    kwargs = {'proxy': proxy_url} if proxy_url else {}
+    with DDGS(**kwargs) as ddgs:
         results = list(ddgs.text(
             query,
             max_results = max_results,
@@ -188,7 +191,7 @@ def run_pipeline():
                         consecutive_errors += 1
                         wait = RATE_LIMIT_WAIT * consecutive_errors
                         log.warning(f"  ⚠ Rate limit! {wait}s kutilmoqda...")
-                        time.sleep(wait)
+                        human_sleep(wait, wait + 1)
                         # Bu vazifani error deb belgilab keyingisiga o'tamiz
                         mark_task(conn, task_id, 'error',
                                   error_msg=str(e), attempt=attempt)
@@ -208,8 +211,7 @@ def run_pipeline():
             batch_count += 1
 
             # So'rovlar orasidagi randomized delay
-            delay = random.uniform(DELAY_MIN, DELAY_MAX)
-            time.sleep(delay)
+            human_sleep(DELAY_MIN, DELAY_MAX)
 
             # Batch tugadi → uzoqroq pauza
             if batch_count >= BATCH_SIZE:
@@ -223,7 +225,7 @@ def run_pipeline():
                     f"  {pause:.0f}s tanaffus...\n"
                     f"{'='*55}\n"
                 )
-                time.sleep(pause)
+                human_sleep(pause, pause + 1)
                 batch_count = 0
 
         # Batch da task qolmadi — davom et yoki tugat

@@ -11,6 +11,11 @@ SESSION_NAME="trofey"
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-8190250269:AAEnmkUac-MQGQ_tC_n7o2WN-iCNXduVNos}"
 TELEGRAM_USER_ID="${TELEGRAM_USER_ID:-1918760732}"
 TELEGRAM_BATCH_SIZE="${TELEGRAM_BATCH_SIZE:-100}"
+ANTIBOT_PROXIES="${ANTIBOT_PROXIES:-}"
+ANTIBOT_DELAY_MIN="${ANTIBOT_DELAY_MIN:-2.0}"
+ANTIBOT_DELAY_MAX="${ANTIBOT_DELAY_MAX:-6.0}"
+ANTIBOT_2CAPTCHA_KEY="${ANTIBOT_2CAPTCHA_KEY:-}"
+ANTIBOT_STEALTH_ENABLED="${ANTIBOT_STEALTH_ENABLED:-false}"
 
 if [ ! -f "$ROOT_DIR/requirements.txt" ]; then
     echo "ERR: $ROOT_DIR/requirements.txt topilmadi"
@@ -30,6 +35,7 @@ source "$VENV_DIR/bin/activate"
 echo "[2/4] Dependencylar o'rnatilmoqda..."
 python -m pip install --upgrade pip
 python -m pip install -r "$ROOT_DIR/requirements.txt"
+python -m playwright install chromium || true
 
 echo "[3/4] Asosiy fayllar tekshirilmoqda..."
 for f in "$ROOT_DIR/brands.json" "$ROOT_DIR/step/run.py" "$ROOT_DIR/step/step6_run.py" "$ROOT_DIR/step/step6_scraper.py"; do
@@ -45,11 +51,17 @@ echo "[4/4] Tayyor."
 echo
 echo "Telegram user: $TELEGRAM_USER_ID"
 echo "Telegram batch size: $TELEGRAM_BATCH_SIZE"
+echo "AntiBot stealth: $ANTIBOT_STEALTH_ENABLED"
 
 cat > "$ROOT_DIR/.runtime.env" <<EOF
 export TELEGRAM_BOT_TOKEN='$TELEGRAM_BOT_TOKEN'
 export TELEGRAM_USER_ID='$TELEGRAM_USER_ID'
 export TELEGRAM_BATCH_SIZE='$TELEGRAM_BATCH_SIZE'
+export ANTIBOT_PROXIES='$ANTIBOT_PROXIES'
+export ANTIBOT_DELAY_MIN='$ANTIBOT_DELAY_MIN'
+export ANTIBOT_DELAY_MAX='$ANTIBOT_DELAY_MAX'
+export ANTIBOT_2CAPTCHA_KEY='$ANTIBOT_2CAPTCHA_KEY'
+export ANTIBOT_STEALTH_ENABLED='$ANTIBOT_STEALTH_ENABLED'
 EOF
 
 chmod 600 "$ROOT_DIR/.runtime.env"

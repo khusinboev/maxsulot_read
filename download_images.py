@@ -28,6 +28,12 @@ from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+from step.anti_bot import (
+    detect_captcha_or_block,
+    get_proxy_dict,
+    human_sleep,
+    random_browser_headers,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG
@@ -75,12 +81,9 @@ _thread_local = threading.local()
 def get_session() -> requests.Session:
     if not hasattr(_thread_local, 'session'):
         s = requests.Session()
-        s.headers.update({
-            'User-Agent': random.choice(USER_AGENTS),
+        s.headers.update(random_browser_headers({
             'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive',
-        })
+        }))
         _thread_local.session = s
     return _thread_local.session
 
@@ -144,7 +147,14 @@ def download_image(url: str, local_path: str, retry: int = 0) -> int:
     """
     session = get_session()
     try:
-        resp = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
+        resp = session.get(url, timeout=REQUEST_TIMEOUT, stream=True, proxies=get_proxy_dict())
+
+        blocked, _ = detect_captcha_or_block(resp.status_code, getattr(resp, 'text', '')[:1000])
+        if blocked:
+            if retry < MAX_RETRIES:
+                human_sleep(4, 8)
+                return download_image(url, local_path, retry + 1)
+            return 0
 
         if resp.status_code == 404:
             return 0
@@ -152,7 +162,7 @@ def download_image(url: str, local_path: str, retry: int = 0) -> int:
         if resp.status_code in (429, 503):
             wait = 30 + random.uniform(0, 15)
             log.warning(f"  ⏳ Rate limit {resp.status_code}, {wait:.0f}s kutmoqda...")
-            time.sleep(wait)
+            human_sleep(wait, wait + 1)
             if retry < MAX_RETRIES:
                 return download_image(url, local_path, retry + 1)
             return 0
@@ -188,7 +198,7 @@ def download_image(url: str, local_path: str, retry: int = 0) -> int:
     except requests.exceptions.SSLError:
         try:
             resp = session.get(url, timeout=REQUEST_TIMEOUT,
-                               stream=True, verify=False)
+                               stream=True, verify=False, proxies=get_proxy_dict())
             if resp.status_code == 200:
                 total = 0
                 with open(local_path, 'wb') as f:
@@ -200,13 +210,13 @@ def download_image(url: str, local_path: str, retry: int = 0) -> int:
             return 0
     except requests.exceptions.ConnectionError:
         if retry < MAX_RETRIES:
-            time.sleep(10 * (retry + 1))
+            human_sleep(8 * (retry + 1), 12 * (retry + 1))
             _thread_local.session = None  # sessiyani yangilash
             return download_image(url, local_path, retry + 1)
         return 0
     except requests.exceptions.ReadTimeout:
         if retry < 1:
-            time.sleep(5)
+            human_sleep(4, 7)
             return download_image(url, local_path, retry + 1)
         return 0
     except Exception as e:
@@ -365,7 +375,7 @@ def process_product(row, db_path: str) -> dict:
         local_path = str(folder / filename)
 
         # Yuklab olish
-        time.sleep(random.uniform(DELAY_MIN, DELAY_MAX))
+        human_sleep(DELAY_MIN, DELAY_MAX)
         file_size = download_image(img_url, local_path)
 
         if file_size > 0:
@@ -466,7 +476,7 @@ def run_downloader(db_path: str = DB_PATH, brand_filter: str = None,
         # Keyingi batch oldidan kichik pauza
         pause = random.uniform(2.0, 5.0)
         log.info(f"  {pause:.1f}s tanaffus...")
-        time.sleep(pause)
+        human_sleep(pause, pause + 1)
 
     # Yakuniy statistika
     log.info(

@@ -37,6 +37,15 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from bs4 import BeautifulSoup
 from parser_utils import canonical_number_key
+from anti_bot import (
+    SimpleResponse,
+    detect_captcha_or_block,
+    get_next_proxy_url,
+    get_proxy_dict,
+    human_sleep,
+    playwright_stealth_fetch,
+    random_browser_headers,
+)
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  CONFIG
@@ -103,20 +112,10 @@ _thread_local = threading.local()
 def make_session() -> requests.Session:
     """Thread-local session yaratadi."""
     s = requests.Session()
-    ua = random.choice(USER_AGENTS)
-    s.headers.update({
-        'User-Agent': ua,
+    s.headers.update(random_browser_headers({
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
         'Accept-Language': random.choice(ACCEPT_LANGS),
-        'Accept-Encoding': 'gzip, deflate, br',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Sec-Fetch-Dest': 'document',
-        'Sec-Fetch-Mode': 'navigate',
-        'Sec-Fetch-Site': 'none',
-        'Cache-Control': 'max-age=0',
-    })
+    }))
     s.max_redirects = 5
     return s
 
@@ -147,12 +146,26 @@ def fetch_url(url: str, referer: str = None, retry: int = 0) -> requests.Respons
     elif 'ozon' in domain:
         headers['x-o3-app-name'] = 'ozon'
 
+    proxy_dict = get_proxy_dict()
+
     try:
         resp = session.get(
             url, headers=headers,
             timeout=REQUEST_TIMEOUT,
-            allow_redirects=True
+            allow_redirects=True,
+            proxies=proxy_dict,
         )
+
+        blocked, reason = detect_captcha_or_block(resp.status_code, getattr(resp, 'text', '')[:3000])
+        if blocked:
+            log.warning(f"  ⚠ Anti-bot aniqlandi ({reason}): {url[:70]}")
+            fallback = playwright_stealth_fetch(url, proxy_url=get_next_proxy_url())
+            if fallback and fallback.get('content'):
+                return SimpleResponse(
+                    int(fallback.get('status_code', 200)),
+                    fallback.get('headers', {}),
+                    fallback.get('content', ''),
+                )
         return resp
     except requests.exceptions.TooManyRedirects:
         log.warning(f"  ⚠ Redirect loop: {url[:70]}")
@@ -161,21 +174,21 @@ def fetch_url(url: str, referer: str = None, retry: int = 0) -> requests.Respons
         log.warning(f"  ⚠ SSL xato, verify=False bilan qayta: {url[:70]}")
         try:
             return session.get(url, headers=headers, timeout=REQUEST_TIMEOUT,
-                               verify=False, allow_redirects=True)
+                               verify=False, allow_redirects=True, proxies=proxy_dict)
         except Exception:
             return None
     except requests.exceptions.ConnectionError as e:
         if retry < MAX_RETRIES:
             wait = RETRY_DELAY * (retry + 1)
             log.warning(f"  ⚠ Connection error, {wait}s dan keyin retry #{retry+1}: {url[:60]}")
-            time.sleep(wait)
+            human_sleep(wait, wait + 1)
             _thread_local.session = make_session()  # yangi session
             return fetch_url(url, referer, retry + 1)
         log.error(f"  ✗ Connection xato (max retry): {url[:60]}: {e}")
         return None
     except requests.exceptions.ReadTimeout:
         if retry < 1:
-            time.sleep(10)
+            human_sleep(8, 12)
             return fetch_url(url, referer, retry + 1)
         log.warning(f"  ⚠ Timeout: {url[:60]}")
         return None
@@ -1241,7 +1254,15 @@ def download_image(img_url: str, local_path: str) -> int:
     """Rasmni yuklab oladi. Fayl hajmini qaytaradi (0 = xato)."""
     try:
         session = get_session()
-        resp = session.get(img_url, timeout=15, stream=True)
+        resp = session.get(
+            img_url,
+            timeout=15,
+            stream=True,
+            proxies=get_proxy_dict(),
+            headers=random_browser_headers({
+                'Accept': 'image/avif,image/webp,image/apng,image/*,*/*;q=0.8',
+            }),
+        )
         if resp.status_code != 200:
             return 0
         content_type = resp.headers.get('Content-Type', '')
@@ -1326,7 +1347,7 @@ def save_images(db_path: str, product_db_id: int, queue_row,
         else:
             log.debug(f"    ✗ Rasm yuklanmadi: {img_url[:60]}")
 
-        time.sleep(0.3)  # rasm so'rovlari orasida kichik pauza
+        human_sleep(0.2, 0.8)  # rasm so'rovlari orasida kichik pauza
 
     conn.close()
     return saved
@@ -1649,7 +1670,7 @@ def run_scraper(domain_filter: str = None, limit: int = None,
             futures = {}
             for row in pending:
                 # Thread ga yetkazishdan oldin kichik farqli delay
-                time.sleep(random.uniform(0.5, 1.5))
+                human_sleep(0.5, 1.5)
                 f = executor.submit(scrape_one, row, DST_DB)
                 futures[f] = row
 
@@ -1691,7 +1712,7 @@ def run_scraper(domain_filter: str = None, limit: int = None,
         # Batch orasidagi pauza
         pause = random.uniform(DELAY_MIN * workers, DELAY_MAX * workers)
         log.info(f"  {pause:.0f}s tanaffus...")
-        time.sleep(pause)
+        human_sleep(pause, pause + 1)
 
         if limit and (total_done + total_skip) >= limit:
             break
