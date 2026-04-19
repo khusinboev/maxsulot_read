@@ -24,6 +24,7 @@ import time
 import random
 import logging
 import sqlite3
+import zipfile
 import hashlib
 import mimetypes
 import threading
@@ -54,6 +55,10 @@ MAX_RETRIES   = 3          # bir URL uchun max urinish
 RETRY_DELAY   = 30         # retry dan oldin kutish
 MAX_IMAGES    = 10         # bitta mahsulotdan max rasm
 DOWNLOAD_IMAGES = False        # rasmlarni yuklab olish
+
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', '').strip()
+TELEGRAM_USER_ID = os.getenv('TELEGRAM_USER_ID', '').strip()
+TELEGRAM_BATCH_SIZE = int(os.getenv('TELEGRAM_BATCH_SIZE', '100'))
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  LOGGING
@@ -1312,6 +1317,167 @@ def save_images(db_path: str, product_db_id: int, queue_row,
     return saved
 
 
+def telegram_enabled(notify_telegram: bool) -> bool:
+    return bool(notify_telegram and TELEGRAM_BOT_TOKEN and TELEGRAM_USER_ID)
+
+
+def telegram_send_message(text: str) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+        resp = requests.post(url, data={
+            'chat_id': TELEGRAM_USER_ID,
+            'text': text,
+            'disable_web_page_preview': True,
+        }, timeout=20)
+        return resp.status_code == 200
+    except Exception as e:
+        log.warning(f"Telegram message yuborilmadi: {e}")
+        return False
+
+
+def telegram_send_document(file_path: str, caption: str) -> bool:
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendDocument"
+        with open(file_path, 'rb') as f:
+            resp = requests.post(
+                url,
+                data={'chat_id': TELEGRAM_USER_ID, 'caption': caption[:1024]},
+                files={'document': f},
+                timeout=120,
+            )
+        return resp.status_code == 200
+    except Exception as e:
+        log.warning(f"Telegram document yuborilmadi: {e}")
+        return False
+
+
+def _zip_batch_payload(db_path: str, product_ids: list[int]) -> tuple[str, int, int] | tuple[None, int, int]:
+    """Batch mahsulotlarni metadata + rasmlar bilan zip qiladi."""
+    if not product_ids:
+        return None, 0, 0
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+
+    placeholders = ','.join(['?'] * len(product_ids))
+    products = conn.execute(f"""
+        SELECT id, src_brand, src_sku, src_barcode, src_product_name,
+               source_url, title, price, parse_method, scraped_at
+        FROM scraped_products
+        WHERE id IN ({placeholders})
+        ORDER BY id ASC
+    """, product_ids).fetchall()
+
+    images = conn.execute(f"""
+        SELECT product_id, local_path
+        FROM downloaded_images
+        WHERE product_id IN ({placeholders})
+        ORDER BY product_id ASC
+    """, product_ids).fetchall()
+    conn.close()
+
+    ts = datetime.now(UTC).strftime('%Y%m%d_%H%M%S')
+    out_zip = os.path.join(BASE, f'../telegram_batch_{ts}.zip')
+
+    manifest = []
+    for p in products:
+        manifest.append({
+            'product_id': p['id'],
+            'brand': p['src_brand'],
+            'sku': p['src_sku'],
+            'barcode': p['src_barcode'],
+            'name': p['src_product_name'],
+            'source_url': p['source_url'],
+            'parsed_title': p['title'],
+            'price': p['price'],
+            'parse_method': p['parse_method'],
+            'scraped_at': p['scraped_at'],
+        })
+
+    added_images = 0
+    with zipfile.ZipFile(out_zip, 'w', compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr('manifest.json', json.dumps(manifest, ensure_ascii=False, indent=2))
+
+        for row in images:
+            p = row['local_path']
+            if not p or not os.path.exists(p):
+                continue
+            arcname = f"images/{row['product_id']}/{os.path.basename(p)}"
+            try:
+                zf.write(p, arcname=arcname)
+                added_images += 1
+            except Exception:
+                pass
+
+    return out_zip, len(products), added_images
+
+
+def _cleanup_sent_images(db_path: str, product_ids: list[int]) -> int:
+    """Jo'natilgan batch rasmlarini diskdan va downloaded_images jadvalidan o'chiradi."""
+    if not product_ids:
+        return 0
+
+    conn = sqlite3.connect(db_path, timeout=30)
+    conn.row_factory = sqlite3.Row
+    placeholders = ','.join(['?'] * len(product_ids))
+
+    rows = conn.execute(f"""
+        SELECT id, local_path
+        FROM downloaded_images
+        WHERE product_id IN ({placeholders})
+    """, product_ids).fetchall()
+
+    deleted = 0
+    row_ids = []
+    for row in rows:
+        lp = row['local_path']
+        if lp and os.path.exists(lp):
+            try:
+                os.remove(lp)
+                deleted += 1
+            except Exception:
+                pass
+        row_ids.append(row['id'])
+
+    if row_ids:
+        placeholders2 = ','.join(['?'] * len(row_ids))
+        conn.execute(f"DELETE FROM downloaded_images WHERE id IN ({placeholders2})", row_ids)
+        conn.commit()
+    conn.close()
+
+    return deleted
+
+
+def flush_telegram_batch(db_path: str, product_ids: list[int], reason: str = 'batch') -> int:
+    """Batchni Telegramga yuboradi, yuborilgach rasmlarni tozalaydi."""
+    if not product_ids:
+        return 0
+
+    zip_path, prod_n, img_n = _zip_batch_payload(db_path, product_ids)
+    if not zip_path:
+        return 0
+
+    caption = f"{reason}: {prod_n} mahsulot, {img_n} rasm"
+    ok = telegram_send_document(zip_path, caption=caption)
+
+    try:
+        if os.path.exists(zip_path):
+            os.remove(zip_path)
+    except Exception:
+        pass
+
+    if not ok:
+        telegram_send_message(f"⚠️ Batch yuborilmadi: {reason} ({prod_n} mahsulot)")
+        return 0
+
+    deleted = _cleanup_sent_images(db_path, product_ids)
+    telegram_send_message(
+        f"✅ {reason} jo'natildi: {prod_n} mahsulot, {img_n} rasm. "
+        f"Diskdan o'chirildi: {deleted} rasm."
+    )
+    return prod_n
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 #  ASOSIY SCRAPING FUNKSIYA (bitta URL)
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1323,7 +1489,7 @@ def scrape_one(queue_row, db_path: str) -> dict:
     queue_id  = queue_row['id']
     attempt   = queue_row['attempt'] + 1
 
-    result = {'url': url, 'status': 'error', 'title': '', 'images': 0}
+    result = {'url': url, 'status': 'error', 'title': '', 'images': 0, 'product_db_id': None}
 
     try:
         resp = fetch_url(url)
@@ -1398,6 +1564,7 @@ def scrape_one(queue_row, db_path: str) -> dict:
             'price':  pd_obj.price,
             'images': imgs_saved,
             'parser': pd_obj.parse_method,
+            'product_db_id': product_db_id,
         })
         log.info(
             f"  ✓ [{pd_obj.parse_method:<20}] "
@@ -1421,10 +1588,20 @@ def scrape_one(queue_row, db_path: str) -> dict:
 # ─────────────────────────────────────────────────────────────────────────────
 
 def run_scraper(domain_filter: str = None, limit: int = None,
-                workers: int = MAX_WORKERS, no_images: bool = False):
+                workers: int = MAX_WORKERS, no_images: bool = False,
+                notify_telegram: bool = False,
+                telegram_batch_size: int = TELEGRAM_BATCH_SIZE):
     global DOWNLOAD_IMAGES
     if no_images:
         DOWNLOAD_IMAGES = False
+
+    notify_on = telegram_enabled(notify_telegram)
+    if notify_on and no_images:
+        # Telegramga rasm yuborish uchun rasm yuklash yoqilgan bo'lishi kerak.
+        DOWNLOAD_IMAGES = True
+
+    if notify_on:
+        telegram_send_message("🚀 Scraper boshlandi. Progress xabarlari yoqilgan.")
 
     # DB init
     init_scraped_db()
@@ -1432,6 +1609,7 @@ def run_scraper(domain_filter: str = None, limit: int = None,
 
     total_done = total_error = total_skip = 0
     batch_n = 0
+    telegram_pending_ids: list[int] = []
 
     log.info(f"\n{'='*60}")
     log.info(f"  SCRAPER BOSHLANDI | workers={workers} | images={DOWNLOAD_IMAGES}")
@@ -1456,6 +1634,16 @@ def run_scraper(domain_filter: str = None, limit: int = None,
                 result = f.result()
                 if result['status'] == 'done':
                     total_done += 1
+                    if notify_on and result.get('product_db_id'):
+                        telegram_pending_ids.append(int(result['product_db_id']))
+                        while len(telegram_pending_ids) >= telegram_batch_size:
+                            to_send = telegram_pending_ids[:telegram_batch_size]
+                            sent = flush_telegram_batch(DST_DB, to_send, reason=f'batch_{batch_n+1}')
+                            if sent > 0:
+                                telegram_pending_ids = telegram_pending_ids[sent:]
+                            else:
+                                # Yuborish bo'lmasa shu batchni keyin qayta urinib ko'ramiz.
+                                break
                 elif result['status'] == 'skip':
                     total_skip += 1
                 else:
@@ -1471,6 +1659,12 @@ def run_scraper(domain_filter: str = None, limit: int = None,
             f"{'─'*50}"
         )
 
+        if notify_on:
+            telegram_send_message(
+                f"📊 Batch #{batch_n}: done={total_done}, error={total_error}, skip={total_skip}, "
+                f"pending_notify={len(telegram_pending_ids)}"
+            )
+
         # Batch orasidagi pauza
         pause = random.uniform(DELAY_MIN * workers, DELAY_MAX * workers)
         log.info(f"  {pause:.0f}s tanaffus...")
@@ -1480,6 +1674,9 @@ def run_scraper(domain_filter: str = None, limit: int = None,
             break
 
     # Yakuniy statistika
+    if notify_on and telegram_pending_ids:
+        flush_telegram_batch(DST_DB, telegram_pending_ids, reason='final_batch')
+
     log.info(
         f"\n{'='*60}\n"
         f"  SCRAPING YAKUNLANDI\n"
@@ -1489,6 +1686,11 @@ def run_scraper(domain_filter: str = None, limit: int = None,
         f"{'='*60}\n"
     )
     show_stats()
+
+    if notify_on:
+        telegram_send_message(
+            f"🏁 Yakunlandi. done={total_done}, error={total_error}, skip={total_skip}."
+        )
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1540,6 +1742,8 @@ if __name__ == '__main__':
     limit_n       = None
     workers_n     = MAX_WORKERS
     no_images     = False
+    notify_telegram = False
+    tg_batch_size = TELEGRAM_BATCH_SIZE
 
     if '--domain' in args:
         i = args.index('--domain')
@@ -1558,6 +1762,13 @@ if __name__ == '__main__':
     if '--no-images' in args:
         no_images = True
 
+    if '--notify-telegram' in args:
+        notify_telegram = True
+
+    if '--tg-batch-size' in args:
+        i = args.index('--tg-batch-size')
+        tg_batch_size = max(1, int(args[i + 1]))
+
     if '--stats' in args:
         show_stats()
 
@@ -1569,11 +1780,11 @@ if __name__ == '__main__':
         cnt = conn.execute("SELECT changes()").fetchone()[0]
         conn.close()
         print(f"{cnt} error → pending qilindi")
-        run_scraper(domain_filter, limit_n, workers_n, no_images)
+        run_scraper(domain_filter, limit_n, workers_n, no_images, notify_telegram, tg_batch_size)
 
     elif '--init' in args:
         init_scraped_db()
         load_queue_from_pipeline(domain_filter=domain_filter)
 
     else:
-        run_scraper(domain_filter, limit_n, workers_n, no_images)
+        run_scraper(domain_filter, limit_n, workers_n, no_images, notify_telegram, tg_batch_size)

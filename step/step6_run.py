@@ -5,6 +5,7 @@ Ishlatish:
   python step6_run.py                    # to'liq scraping
   python step6_run.py --domain ozon.ru   # bitta domen
   python step6_run.py --limit 50         # faqat 50 URL
+    python step6_run.py --notify-telegram  # Telegram progress + batch jo'natish
   python step6_run.py --stats            # holat
   python step6_run.py --check-urls       # URL muammolarini ko'rsatish
 """
@@ -61,6 +62,8 @@ if __name__ == '__main__':
     limit_n = None
     workers_n = s6.MAX_WORKERS
     no_images = False
+    notify_telegram = False
+    tg_batch_size = s6.TELEGRAM_BATCH_SIZE
 
     if '--domain' in args:
         i = args.index('--domain')
@@ -77,6 +80,13 @@ if __name__ == '__main__':
     if '--no-images' in args:
         no_images = True
 
+    if '--notify-telegram' in args:
+        notify_telegram = True
+
+    if '--tg-batch-size' in args:
+        i = args.index('--tg-batch-size')
+        tg_batch_size = max(1, int(args[i + 1]))
+
     if '--stats' in args:
         s6.show_stats()
     elif '--retry-errors' in args:
@@ -86,9 +96,9 @@ if __name__ == '__main__':
         cnt = conn.execute("SELECT changes()").fetchone()[0]
         conn.close()
         print(f"{cnt} error → pending qilindi")
-        s6.run_scraper(domain_filter, limit_n, workers_n, no_images)
+        s6.run_scraper(domain_filter, limit_n, workers_n, no_images, notify_telegram, tg_batch_size)
     elif '--init' in args:
         s6.init_scraped_db()
         s6.load_queue_from_pipeline(domain_filter=domain_filter)
     else:
-        s6.run_scraper(domain_filter, limit_n, workers_n, no_images)
+        s6.run_scraper(domain_filter, limit_n, workers_n, no_images, notify_telegram, tg_batch_size)
