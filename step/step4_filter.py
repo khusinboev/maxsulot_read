@@ -2,9 +2,9 @@
 STEP 4: URL filtrlash va clean_products table ga yozish
 
 Maqsad:
-  search_results dan ZIPBAITS / WORMIX / KOSADAKA mahsulotlari uchun
-  yig'ilgan URL larni bir-bir tekshiradi va faqat haqiqiy mahsulot
-  sahifalarini yangi `clean_products` table ga saqlaydi.
+    search_results dan barcha brandlar uchun yig'ilgan URL larni bir-bir
+    tekshiradi va faqat haqiqiy mahsulot sahifalarini yangi
+    `clean_products` table ga saqlaydi.
 
 Yangi table tarkibi (keyingi loyiha uchun):
   brand, barcode, sku, product_id, product_name, url, url_domain,
@@ -25,7 +25,6 @@ from urllib.parse import urlparse
 
 # ── Config ────────────────────────────────────────────────────────────────────
 DB_PATH       = os.path.join(os.path.dirname(os.path.abspath(__file__)), '../pipeline.db')
-TARGET_BRANDS = {'ZIPBAITS', 'WORMIX', 'KOSADAKA'}
 MIN_SCORE     = 45      # shu va yuqori → qabul
 DEBUG_MODE    = False   # True bo'lsa rad etilganlar ham logga yoziladi
 
@@ -186,7 +185,9 @@ FISHING_KW_RE = re.compile(
     re.IGNORECASE
 )
 
-# Brand URL ko'rinishlari
+# Brand URL ko'rinishlari.
+# Maxsus ma'lum variantlar shu yerda, qolgan brandlar uchun default
+# sifatida brand.lower() ishlatiladi.
 BRAND_HINTS: dict[str, list[str]] = {
     'ZIPBAITS': ['zipbait', 'zip-bait', 'zip_bait'],
     'WORMIX':   ['wormix'],
@@ -377,9 +378,8 @@ def create_clean_table(conn: sqlite3.Connection):
 
 
 def load_raw_data(conn: sqlite3.Connection) -> list:
-    """TARGET_BRANDS uchun barcha search_results ni yuklaydi."""
-    placeholders = ','.join('?' * len(TARGET_BRANDS))
-    cur = conn.execute(f"""
+    """Barcha brandlar uchun search_results ni yuklaydi."""
+    cur = conn.execute("""
         SELECT
             t.id          AS task_id,
             t.brand,
@@ -393,12 +393,11 @@ def load_raw_data(conn: sqlite3.Connection) -> list:
             r.position
         FROM search_results r
         JOIN search_tasks   t ON r.task_id = t.id
-        WHERE t.brand IN ({placeholders})
-          AND t.status = 'done'
+                WHERE t.status = 'done'
           AND r.url IS NOT NULL
           AND r.url != ''
         ORDER BY t.brand, t.product_id, r.position
-    """, list(TARGET_BRANDS))
+        """)
     return cur.fetchall()
 
 
